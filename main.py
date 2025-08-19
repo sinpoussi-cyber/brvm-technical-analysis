@@ -1,5 +1,5 @@
 # ==============================================================================
-# ANALYSE TECHNIQUE BRVM - V1.1 (GitHub Actions & Service Account)
+# ANALYSE TECHNIQUE BRVM - V2.0 (GitHub Actions & Logique Métier Avancée)
 # ==============================================================================
 
 # --- Imports ---
@@ -12,25 +12,18 @@ import re
 import os
 import json
 import time
-import logging  # Assurez-vous que logging est bien importé
+import logging
 
 warnings.filterwarnings('ignore')
-
-# ==============================================================================
-# CORRECTION : Ajout de la configuration du logging
-# ==============================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
 
-# --- Authentification via Compte de Service (pour GitHub Actions) ---
+# --- Authentification via Compte de Service ---
 def authenticate_gsheets():
-    """
-    Authentification via compte de service Google.
-    """
     try:
         logging.info("Authentification via compte de service Google...")
         creds_json_str = os.environ.get('GSPREAD_SERVICE_ACCOUNT')
         if not creds_json_str:
-            logging.error("❌ Secret GSPREAD_SERVICE_ACCOUNT introuvable dans l'environnement.")
+            logging.error("❌ Secret GSPREAD_SERVICE_ACCOUNT introuvable.")
             return None
         creds_dict = json.loads(creds_json_str)
         scopes = ['https://www.googleapis.com/auth/spreadsheets']
@@ -43,139 +36,147 @@ def authenticate_gsheets():
         return None
 
 def clean_numeric_value(value):
-    """
-    Nettoie et convertit une valeur en nombre.
-    """
-    if pd.isna(value) or value == '' or value is None:
-        return np.nan
-    str_value = str(value).strip()
-    str_value = re.sub(r'[^\d.,\-+]', '', str_value)
-    str_value = str_value.replace(',', '.')
+    if pd.isna(value) or value == '' or value is None: return np.nan
+    str_value = re.sub(r'[^\d.,\-+]', '', str(value).strip()).replace(',', '.')
     try:
         return float(str_value)
     except (ValueError, TypeError):
         return np.nan
 
-def convert_columns_to_numeric(gc, spreadsheet_id, sheet_name):
-    """
-    Convertit les colonnes C, D et E en valeurs numériques.
-    """
-    try:
-        spreadsheet = gc.open_by_key(spreadsheet_id)
-        worksheet = spreadsheet.worksheet(sheet_name)
-        logging.info(f"Conversion des données numériques pour {sheet_name}...")
-        all_values = worksheet.get_all_values()
+# --- Fonctions de calcul des indicateurs (mises à jour selon vos règles) ---
 
-        if len(all_values) < 2:
-            logging.warning(f"Pas assez de données dans {sheet_name}")
-            return False
-
-        headers = all_values[0]
-        data = all_values[1:]
-        
-        columns_to_convert = []
-        if len(headers) > 2: columns_to_convert.append((2, 'C')) # Cours
-        if len(headers) > 3: columns_to_convert.append((3, 'D')) # Volume
-        if len(headers) > 4: columns_to_convert.append((4, 'E')) # Valeurs
-
-        updates = []
-        for col_index, col_letter in columns_to_convert:
-            numeric_values = []
-            for row in data:
-                if col_index < len(row):
-                    cleaned_value = clean_numeric_value(row[col_index])
-                    numeric_values.append([cleaned_value if not pd.isna(cleaned_value) else ""])
-                else:
-                    numeric_values.append([""])
-            
-            if numeric_values:
-                updates.append({
-                    'range': f'{col_letter}2:{col_letter}{len(data) + 1}',
-                    'values': numeric_values
-                })
-
-        if updates:
-            worksheet.batch_update(updates, value_input_option='USER_ENTERED')
-            logging.info(f"  ✓ Colonnes converties avec succès pour {sheet_name}")
-        return True
-
-    except Exception as e:
-        logging.error(f"  ✗ Erreur lors de la conversion pour {sheet_name}: {e}")
-        return False
-
-# --- Fonctions de calcul des indicateurs ---
-def calculate_moving_averages(df, price_col):
+def calculate_moving_averages(df, price_col='Cours (F CFA)'):
+    logging.info("  -> Calcul des Moyennes Mobiles...")
     df['MM5'] = df[price_col].rolling(window=5).mean()
     df['MM10'] = df[price_col].rolling(window=10).mean()
     df['MM20'] = df[price_col].rolling(window=20).mean()
     df['MM50'] = df[price_col].rolling(window=50).mean()
+
     def mm_decision(row):
-        if pd.isna(row['MM5']) or pd.isna(row['MM20']): return "Attendre"
-        if row['MM5'] > row['MM20']: return "Achat"
-        elif row['MM5'] < row['MM20']: return "Vente"
-        return "Neutre"
+        price, mm5, mm10, mm20, mm50 = row[price_col], row['MM5'], row['MM10'], row['MM20'], row['MM50']
+        if pd.isna(price) or pd.isna(mm5) or pd.isna(mm10) or pd.isna(mm20) or pd.isna(mm50):
+            return "Attendre"
+        
+        cond1 = (price > mm5) and (mm5 > mm10)
+        cond2 = (mm5 > mm10) and (mm10 > mm20)
+        cond3 = (mm10 > mm20) and (mm20 > mm50)
+        
+        if cond1 or cond2 or cond3:
+            return "Achat"
+        else:
+            return "Vente"
+
     df['MMdecision'] = df.apply(mm_decision, axis=1)
     return df
 
-def calculate_bollinger_bands(df, price_col, window=20, num_std=2):
-    rolling_mean = df[price_col].rolling(window=window).mean()
+def calculate_bollinger_bands(df, price_col='Cours (F CFA)', window=35, num_std=2):
+    logging.info("  -> Calcul des Bandes de Bollinger...")
+    df['Bande_centrale'] = df[price_col].rolling(window=window).mean()
     rolling_std = df[price_col].rolling(window=window).std()
-    df['Bande_Superieure'] = rolling_mean + (rolling_std * num_std)
-    df['Bande_Inferieure'] = rolling_mean - (rolling_std * num_std)
+    df['Bande_Supérieure'] = df['Bande_centrale'] + (rolling_std * num_std)
+    df['Bande_Inferieure'] = df['Bande_centrale'] - (rolling_std * num_std)
+
     def bollinger_decision(row):
-        if pd.isna(row['Bande_Superieure']): return "Attendre"
-        if row[price_col] <= row['Bande_Inferieure']: return "Achat"
-        elif row[price_col] >= row['Bande_Superieure']: return "Vente"
+        price, lower, upper = row[price_col], row['Bande_Inferieure'], row['Bande_Supérieure']
+        if pd.isna(price) or pd.isna(lower) or pd.isna(upper):
+            return "Attendre"
+        if price <= lower: return "Achat"
+        if price >= upper: return "Vente"
         return "Neutre"
+
     df['Boldecision'] = df.apply(bollinger_decision, axis=1)
     return df
 
-def calculate_macd(df, price_col):
-    ema_fast = df[price_col].ewm(span=10, adjust=False).mean()
-    ema_slow = df[price_col].ewm(span=20, adjust=False).mean()
-    df['Ligne_MACD'] = ema_fast - ema_slow
-    df['Ligne_Signal'] = df['Ligne_MACD'].ewm(span=5, adjust=False).mean()
-    def macd_decision(row):
-        if pd.isna(row['Ligne_MACD']) or pd.isna(row['Ligne_Signal']): return "Attendre"
-        if row['Ligne_MACD'] > row['Ligne_Signal']: return "Achat"
-        elif row['Ligne_MACD'] < row['Ligne_Signal']: return "Vente"
+def calculate_macd(df, price_col='Cours (F CFA)', fast=12, slow=26, signal=9):
+    logging.info("  -> Calcul du MACD...")
+    df['MME_fast'] = df[price_col].ewm(span=fast, adjust=False).mean()
+    df['MME_slow'] = df[price_col].ewm(span=slow, adjust=False).mean()
+    df['Ligne MACD'] = df['MME_fast'] - df['MME_slow']
+    df['Ligne de signal'] = df['Ligne MACD'].ewm(span=signal, adjust=False).mean()
+    df['Histogramme'] = df['Ligne MACD'] - df['Ligne de signal']
+
+    def macd_decision(row, prev_row):
+        histo = row['Histogramme']
+        prev_histo = prev_row['Histogramme'] if prev_row is not None else 0
+        if pd.isna(histo) or pd.isna(prev_histo): return "Attendre"
+
+        # Croisement de la ligne zéro
+        if prev_histo <= 0 and histo > 0: return "Achat (Fort)"
+        if prev_histo >= 0 and histo < 0: return "Vente (Fort)"
+        
+        # Logique de base
+        if histo > 0: return "Achat"
+        if histo < 0: return "Vente"
+        
         return "Neutre"
-    df['deciMACD'] = df.apply(macd_decision, axis=1)
+
+    decisions = ["Attendre"] * len(df)
+    for i in range(1, len(df)):
+        decisions[i] = macd_decision(df.iloc[i], df.iloc[i-1])
+    df['MACDdecision'] = decisions
     return df
 
-def calculate_rsi(df, price_col, period=10):
+def calculate_rsi(df, price_col='Cours (F CFA)', period=20):
+    logging.info("  -> Calcul du RSI...")
     delta = df[price_col].diff(1)
     gain = delta.where(delta > 0, 0).ewm(alpha=1/period, adjust=False).mean()
     loss = -delta.where(delta < 0, 0).ewm(alpha=1/period, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
+    df['RS'] = rs
     df['RSI'] = 100 - (100 / (1 + rs))
-    def rsi_decision(row):
-        if pd.isna(row['RSI']): return "Attendre"
-        if row['RSI'] < 30: return "Achat"
-        elif row['RSI'] > 70: return "Vente"
+
+    def rsi_decision(row, prev_row):
+        rsi = row['RSI']
+        prev_rsi = prev_row['RSI'] if prev_row is not None else np.nan
+        if pd.isna(rsi) or pd.isna(prev_rsi): return "Attendre"
+        
+        if prev_rsi <= 30 and rsi > 30: return "Achat"
+        if prev_rsi >= 70 and rsi < 70: return "Vente"
+        
         return "Neutre"
-    df['DeciRSI'] = df.apply(rsi_decision, axis=1)
+
+    decisions = ["Attendre"] * len(df)
+    for i in range(1, len(df)):
+        decisions[i] = rsi_decision(df.iloc[i], df.iloc[i-1])
+    df['RSIdecision'] = decisions
     return df
 
-def calculate_stochastic(df, price_col, k_period=10, d_period=3):
+def calculate_stochastic(df, price_col='Cours (F CFA)', k_period=20, d_period=5):
+    logging.info("  -> Calcul du Stochastique...")
     rolling_high = df[price_col].rolling(window=k_period).max()
     rolling_low = df[price_col].rolling(window=k_period).min()
     denominator = (rolling_high - rolling_low).replace(0, np.nan)
     df['%K'] = 100 * ((df[price_col] - rolling_low) / denominator)
     df['%D'] = df['%K'].rolling(window=d_period).mean()
-    def stochastic_decision(row):
-        if pd.isna(row['%K']) or pd.isna(row['%D']): return "Attendre"
-        if row['%K'] < 20 and row['%D'] < 20: return "Achat"
-        elif row['%K'] > 80 and row['%D'] > 80: return "Vente"
+
+    def stochastic_decision(row, prev_row):
+        k, d = row['%K'], row['%D']
+        prev_k, prev_d = (prev_row['%K'], prev_row['%D']) if prev_row is not None else (np.nan, np.nan)
+        if pd.isna(k) or pd.isna(d) or pd.isna(prev_k) or pd.isna(prev_d): return "Attendre"
+        
+        # Croisements
+        if prev_k <= prev_d and k > d and d < 20: return "Achat (Fort)"
+        if prev_k >= prev_d and k < d and d > 80: return "Vente (Fort)"
+        if prev_k <= prev_d and k > d: return "Achat"
+        if prev_k >= prev_d and k < d: return "Vente"
+        
+        # Zones
+        if d > 80: return "Surachat"
+        if d < 20: return "Survente"
+        
         return "Neutre"
-    df['deciStoc'] = df.apply(stochastic_decision, axis=1)
+
+    decisions = ["Attendre"] * len(df)
+    for i in range(1, len(df)):
+        decisions[i] = stochastic_decision(df.iloc[i], df.iloc[i-1])
+    df['Stocdecision'] = decisions
     return df
 
 def process_single_sheet(gc, spreadsheet_id, sheet_name):
     try:
         spreadsheet = gc.open_by_key(spreadsheet_id)
         worksheet = spreadsheet.worksheet(sheet_name)
-        data = worksheet.get_all_records()
+        data = worksheet.get_all_records(numericise_ignore=['all']) # Lire tout comme string
         df = pd.DataFrame(data)
 
         if df.empty:
@@ -188,33 +189,40 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
             return False
 
         df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
+        
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y', errors='coerce')
+            df = df.sort_values('Date').reset_index(drop=True)
+
         df_clean = df.dropna(subset=[price_col]).reset_index(drop=True)
 
         if len(df_clean) < 50:
-            logging.warning(f"  ✗ Pas assez de données pour {sheet_name} ({len(df_clean)} lignes)")
+            logging.warning(f"  ✗ Pas assez de données pour {sheet_name} ({len(df_clean)} lignes) pour calculer MM50.")
             return False
 
-        logging.info(f"  Calcul des indicateurs pour {sheet_name}...")
+        # Calculer tous les indicateurs
         df_clean = calculate_moving_averages(df_clean, price_col)
         df_clean = calculate_bollinger_bands(df_clean, price_col)
         df_clean = calculate_macd(df_clean, price_col)
         df_clean = calculate_rsi(df_clean, price_col)
         df_clean = calculate_stochastic(df_clean, price_col)
         
-        headers_to_write = ['MM5','MM10','MM20','MM50','MMdecision','Bande_Superieure','Bande_Inferieure','Boldecision','Ligne_MACD','Ligne_Signal','deciMACD','RSI','DeciRSI','%K','%D','deciStoc']
+        # Préparer les données pour l'écriture
+        final_df = df.merge(df_clean, on=list(df.columns), how='left')
+
+        # Arrondir et formater
+        numeric_cols = ['MM5','MM10','MM20','MM50','Bande_centrale','Bande_Supérieure','Bande_Inferieure','Ligne MACD','Ligne de signal','Histogramme','RS','RSI','%K','%D']
+        for col in numeric_cols:
+            if col in final_df.columns:
+                final_df[col] = final_df[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "")
         
-        df_to_write = df_clean[headers_to_write].copy()
-        for col in ['MM5', 'MM10', 'MM20', 'MM50', 'Bande_Superieure', 'Bande_Inferieure', 'Ligne_MACD', 'Ligne_Signal', 'RSI', '%K', '%D']:
-            df_to_write[col] = df_to_write[col].round(2)
+        # Mettre à jour les en-têtes (F à Y)
+        headers = ['MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision']
+        worksheet.update('F1:X1', [headers])
         
-        df_to_write = df_to_write.fillna('')
-        
-        worksheet.update('F1:Y1', [[
-            'MM5','MM10','MM20','MM50','MMdecision','','Bande_Superieure','Bande_Inferieure','Boldecision','','Ligne_MACD','Ligne_Signal','deciMACD','','RSI','DeciRSI','','%K','%D','deciStoc'
-        ]])
-        
-        data_list = df_to_write.values.tolist()
-        worksheet.update(f'F2:Y{len(data_list)+1}', data_list)
+        # Mettre à jour les données
+        data_to_write = final_df[headers].values.tolist()
+        worksheet.update(f'F2:X{len(data_to_write)+1}', data_to_write)
         
         logging.info(f"  ✓ Traitement terminé pour {sheet_name}")
         return True
@@ -233,16 +241,16 @@ def main():
         spreadsheet = gc.open_by_key(spreadsheet_id)
         logging.info(f"Fichier ouvert: {spreadsheet.title}")
 
-        sheet_names = [ws.title for ws in spreadsheet.worksheets() if ws.title != "UNMATCHED"]
+        sheet_names = [ws.title for ws in spreadsheet.worksheets() if ws.title not in ["UNMATCHED", "Actions_BRVM"]]
         logging.info(f"Feuilles à traiter: {sheet_names}")
 
         for sheet_name in sheet_names:
             logging.info(f"\n--- TRAITEMENT DE LA FEUILLE: {sheet_name} ---")
             
-            time.sleep(2) # Pause pour gérer le quota
+            time.sleep(5) # Pause plus longue pour éviter les quotas
             convert_columns_to_numeric(gc, spreadsheet_id, sheet_name)
             
-            time.sleep(2) # Une autre pause
+            time.sleep(5) # Une autre pause
             process_single_sheet(gc, spreadsheet_id, sheet_name)
 
     except Exception as e:
