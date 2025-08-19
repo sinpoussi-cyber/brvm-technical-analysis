@@ -1,5 +1,5 @@
 # ==============================================================================
-# ANALYSE TECHNIQUE BRVM - V1.0 (GitHub Actions & Service Account)
+# ANALYSE TECHNIQUE BRVM - V1.1 (GitHub Actions & Service Account)
 # ==============================================================================
 
 # --- Imports ---
@@ -12,8 +12,14 @@ import re
 import os
 import json
 import time
+import logging  # Assurez-vous que logging est bien importé
 
 warnings.filterwarnings('ignore')
+
+# ==============================================================================
+# CORRECTION : Ajout de la configuration du logging
+# ==============================================================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
 
 # --- Authentification via Compte de Service (pour GitHub Actions) ---
 def authenticate_gsheets():
@@ -195,29 +201,20 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
         df_clean = calculate_rsi(df_clean, price_col)
         df_clean = calculate_stochastic(df_clean, price_col)
         
-        # Préparation des données pour l'écriture
-        final_df = df_clean.drop(columns=[col for col in df.columns if col not in DEFAULT_HEADERS], errors='ignore')
-        
-        # Arrondir les valeurs numériques pour un affichage propre
-        for col in ['MM5', 'MM10', 'MM20', 'MM50', 'Bande_Superieure', 'Bande_Inferieure', 'Ligne_MACD', 'Ligne_Signal', 'RSI', '%K', '%D']:
-            if col in final_df.columns:
-                final_df[col] = final_df[col].round(2)
-        
-        # Remplacer NaN par des chaînes vides
-        final_df = final_df.fillna('')
-
-        # Préparer les données pour la mise à jour par lot
-        updates = []
         headers_to_write = ['MM5','MM10','MM20','MM50','MMdecision','Bande_Superieure','Bande_Inferieure','Boldecision','Ligne_MACD','Ligne_Signal','deciMACD','RSI','DeciRSI','%K','%D','deciStoc']
         
-        # Mettre à jour les en-têtes (Colonnes F à Y)
+        df_to_write = df_clean[headers_to_write].copy()
+        for col in ['MM5', 'MM10', 'MM20', 'MM50', 'Bande_Superieure', 'Bande_Inferieure', 'Ligne_MACD', 'Ligne_Signal', 'RSI', '%K', '%D']:
+            df_to_write[col] = df_to_write[col].round(2)
+        
+        df_to_write = df_to_write.fillna('')
+        
         worksheet.update('F1:Y1', [[
             'MM5','MM10','MM20','MM50','MMdecision','','Bande_Superieure','Bande_Inferieure','Boldecision','','Ligne_MACD','Ligne_Signal','deciMACD','','RSI','DeciRSI','','%K','%D','deciStoc'
         ]])
         
-        # Mettre à jour les données
-        data_to_write = final_df[headers_to_write].values.tolist()
-        worksheet.update(f'F2:Y{len(data_to_write)+1}', data_to_write)
+        data_list = df_to_write.values.tolist()
+        worksheet.update(f'F2:Y{len(data_list)+1}', data_list)
         
         logging.info(f"  ✓ Traitement terminé pour {sheet_name}")
         return True
@@ -242,14 +239,10 @@ def main():
         for sheet_name in sheet_names:
             logging.info(f"\n--- TRAITEMENT DE LA FEUILLE: {sheet_name} ---")
             
-            # Pause pour gérer le quota de l'API Sheets
-            time.sleep(2)
-            
+            time.sleep(2) # Pause pour gérer le quota
             convert_columns_to_numeric(gc, spreadsheet_id, sheet_name)
             
-            # Une autre pause avant la prochaine série de lectures/écritures
-            time.sleep(2)
-            
+            time.sleep(2) # Une autre pause
             process_single_sheet(gc, spreadsheet_id, sheet_name)
 
     except Exception as e:
