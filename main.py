@@ -1,5 +1,5 @@
 # ==============================================================================
-# ANALYSE TECHNIQUE BRVM - V2.0 (GitHub Actions & Logique Métier Avancée)
+# ANALYSE TECHNIQUE BRVM - V2.1 (GitHub Actions & Logique Métier Corrigée)
 # ==============================================================================
 
 # --- Imports ---
@@ -43,8 +43,57 @@ def clean_numeric_value(value):
     except (ValueError, TypeError):
         return np.nan
 
-# --- Fonctions de calcul des indicateurs (mises à jour selon vos règles) ---
+# ==============================================================================
+# CORRECTION : Rajout de la fonction manquante
+# ==============================================================================
+def convert_columns_to_numeric(gc, spreadsheet_id, sheet_name):
+    """
+    Convertit les colonnes C, D et E en valeurs numériques.
+    """
+    try:
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(sheet_name)
+        logging.info(f"Conversion des données numériques pour {sheet_name}...")
+        all_values = worksheet.get_all_values()
 
+        if len(all_values) < 2:
+            logging.warning(f"Pas assez de données dans {sheet_name}")
+            return False
+
+        headers = all_values[0]
+        data = all_values[1:]
+        
+        columns_to_convert = []
+        if len(headers) > 2: columns_to_convert.append((2, 'C')) # Cours
+        if len(headers) > 3: columns_to_convert.append((3, 'D')) # Volume
+        if len(headers) > 4: columns_to_convert.append((4, 'E')) # Valeurs
+
+        updates = []
+        for col_index, col_letter in columns_to_convert:
+            numeric_values = []
+            for row in data:
+                if col_index < len(row):
+                    cleaned_value = clean_numeric_value(row[col_index])
+                    numeric_values.append([cleaned_value if not pd.isna(cleaned_value) else ""])
+                else:
+                    numeric_values.append([""])
+            
+            if numeric_values:
+                updates.append({
+                    'range': f'{col_letter}2:{col_letter}{len(data) + 1}',
+                    'values': numeric_values
+                })
+
+        if updates:
+            worksheet.batch_update(updates, value_input_option='USER_ENTERED')
+            logging.info(f"  ✓ Colonnes converties avec succès pour {sheet_name}")
+        return True
+
+    except Exception as e:
+        logging.error(f"  ✗ Erreur lors de la conversion pour {sheet_name}: {e}")
+        return False
+
+# --- Fonctions de calcul des indicateurs ---
 def calculate_moving_averages(df, price_col='Cours (F CFA)'):
     logging.info("  -> Calcul des Moyennes Mobiles...")
     df['MM5'] = df[price_col].rolling(window=5).mean()
@@ -54,7 +103,7 @@ def calculate_moving_averages(df, price_col='Cours (F CFA)'):
 
     def mm_decision(row):
         price, mm5, mm10, mm20, mm50 = row[price_col], row['MM5'], row['MM10'], row['MM20'], row['MM50']
-        if pd.isna(price) or pd.isna(mm5) or pd.isna(mm10) or pd.isna(mm20) or pd.isna(mm50):
+        if any(pd.isna(val) for val in [price, mm5, mm10, mm20, mm50]):
             return "Attendre"
         
         cond1 = (price > mm5) and (mm5 > mm10)
@@ -78,7 +127,7 @@ def calculate_bollinger_bands(df, price_col='Cours (F CFA)', window=35, num_std=
 
     def bollinger_decision(row):
         price, lower, upper = row[price_col], row['Bande_Inferieure'], row['Bande_Supérieure']
-        if pd.isna(price) or pd.isna(lower) or pd.isna(upper):
+        if any(pd.isna(val) for val in [price, lower, upper]):
             return "Attendre"
         if price <= lower: return "Achat"
         if price >= upper: return "Vente"
@@ -100,11 +149,9 @@ def calculate_macd(df, price_col='Cours (F CFA)', fast=12, slow=26, signal=9):
         prev_histo = prev_row['Histogramme'] if prev_row is not None else 0
         if pd.isna(histo) or pd.isna(prev_histo): return "Attendre"
 
-        # Croisement de la ligne zéro
         if prev_histo <= 0 and histo > 0: return "Achat (Fort)"
         if prev_histo >= 0 and histo < 0: return "Vente (Fort)"
         
-        # Logique de base
         if histo > 0: return "Achat"
         if histo < 0: return "Vente"
         
@@ -152,15 +199,13 @@ def calculate_stochastic(df, price_col='Cours (F CFA)', k_period=20, d_period=5)
     def stochastic_decision(row, prev_row):
         k, d = row['%K'], row['%D']
         prev_k, prev_d = (prev_row['%K'], prev_row['%D']) if prev_row is not None else (np.nan, np.nan)
-        if pd.isna(k) or pd.isna(d) or pd.isna(prev_k) or pd.isna(prev_d): return "Attendre"
+        if any(pd.isna(val) for val in [k, d, prev_k, prev_d]): return "Attendre"
         
-        # Croisements
         if prev_k <= prev_d and k > d and d < 20: return "Achat (Fort)"
         if prev_k >= prev_d and k < d and d > 80: return "Vente (Fort)"
         if prev_k <= prev_d and k > d: return "Achat"
         if prev_k >= prev_d and k < d: return "Vente"
         
-        # Zones
         if d > 80: return "Surachat"
         if d < 20: return "Survente"
         
@@ -176,17 +221,17 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
     try:
         spreadsheet = gc.open_by_key(spreadsheet_id)
         worksheet = spreadsheet.worksheet(sheet_name)
-        data = worksheet.get_all_records(numericise_ignore=['all']) # Lire tout comme string
+        data = worksheet.get_all_records(numericise_ignore=['all'])
         df = pd.DataFrame(data)
 
         if df.empty:
             logging.warning(f"  La feuille {sheet_name} est vide.")
-            return False
+            return
         
         price_col = 'Cours (F CFA)'
         if price_col not in df.columns:
             logging.error(f"  ✗ Colonne '{price_col}' introuvable dans {sheet_name}")
-            return False
+            return
 
         df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
         
@@ -198,38 +243,34 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
 
         if len(df_clean) < 50:
             logging.warning(f"  ✗ Pas assez de données pour {sheet_name} ({len(df_clean)} lignes) pour calculer MM50.")
-            return False
+            return
 
-        # Calculer tous les indicateurs
         df_clean = calculate_moving_averages(df_clean, price_col)
         df_clean = calculate_bollinger_bands(df_clean, price_col)
         df_clean = calculate_macd(df_clean, price_col)
         df_clean = calculate_rsi(df_clean, price_col)
         df_clean = calculate_stochastic(df_clean, price_col)
         
-        # Préparer les données pour l'écriture
-        final_df = df.merge(df_clean, on=list(df.columns), how='left')
+        final_df = df.merge(df_clean, on=list(df.columns.intersection(df_clean.columns)), how='left')
 
-        # Arrondir et formater
+        headers_to_write = ['MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision']
+        
+        df_to_write = final_df[headers_to_write].copy()
         numeric_cols = ['MM5','MM10','MM20','MM50','Bande_centrale','Bande_Supérieure','Bande_Inferieure','Ligne MACD','Ligne de signal','Histogramme','RS','RSI','%K','%D']
         for col in numeric_cols:
-            if col in final_df.columns:
-                final_df[col] = final_df[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "")
+            df_to_write[col] = df_to_write[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "")
         
-        # Mettre à jour les en-têtes (F à Y)
-        headers = ['MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision']
-        worksheet.update('F1:X1', [headers])
+        worksheet.update('F1:X1', [[
+            'MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision'
+        ]])
         
-        # Mettre à jour les données
-        data_to_write = final_df[headers].values.tolist()
-        worksheet.update(f'F2:X{len(data_to_write)+1}', data_to_write)
+        data_list = df_to_write.values.tolist()
+        worksheet.update(f'F2:X{len(data_list)+1}', data_list)
         
         logging.info(f"  ✓ Traitement terminé pour {sheet_name}")
-        return True
 
     except Exception as e:
         logging.error(f"  ✗ Erreur lors du traitement de {sheet_name}: {e}")
-        return False
 
 def main():
     spreadsheet_id = "1EGXyg13ml8a9zr4OaUPnJN3i-rwVO2uq330yfxJXnSM"
@@ -247,10 +288,10 @@ def main():
         for sheet_name in sheet_names:
             logging.info(f"\n--- TRAITEMENT DE LA FEUILLE: {sheet_name} ---")
             
-            time.sleep(5) # Pause plus longue pour éviter les quotas
+            time.sleep(5)
             convert_columns_to_numeric(gc, spreadsheet_id, sheet_name)
             
-            time.sleep(5) # Une autre pause
+            time.sleep(5)
             process_single_sheet(gc, spreadsheet_id, sheet_name)
 
     except Exception as e:
