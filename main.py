@@ -1,5 +1,5 @@
 # ==============================================================================
-# ANALYSE TECHNIQUE BRVM - V2.1 (GitHub Actions & Logique Métier Corrigée)
+# ANALYSE TECHNIQUE BRVM - V2.2 (GitHub Actions & Logique Métier Corrigée)
 # ==============================================================================
 
 # --- Imports ---
@@ -43,13 +43,7 @@ def clean_numeric_value(value):
     except (ValueError, TypeError):
         return np.nan
 
-# ==============================================================================
-# CORRECTION : Rajout de la fonction manquante
-# ==============================================================================
 def convert_columns_to_numeric(gc, spreadsheet_id, sheet_name):
-    """
-    Convertit les colonnes C, D et E en valeurs numériques.
-    """
     try:
         spreadsheet = gc.open_by_key(spreadsheet_id)
         worksheet = spreadsheet.worksheet(sheet_name)
@@ -221,12 +215,19 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
     try:
         spreadsheet = gc.open_by_key(spreadsheet_id)
         worksheet = spreadsheet.worksheet(sheet_name)
-        data = worksheet.get_all_records(numericise_ignore=['all'])
-        df = pd.DataFrame(data)
-
-        if df.empty:
+        
+        # ======================================================================
+        # CORRECTION : Utiliser get_all_values() au lieu de get_all_records()
+        # pour éviter l'erreur de doublons dans les en-têtes.
+        # ======================================================================
+        all_values = worksheet.get_all_values()
+        if not all_values:
             logging.warning(f"  La feuille {sheet_name} est vide.")
             return
+
+        headers = all_values[0]
+        data = all_values[1:]
+        df = pd.DataFrame(data, columns=headers)
         
         price_col = 'Cours (F CFA)'
         if price_col not in df.columns:
@@ -260,9 +261,9 @@ def process_single_sheet(gc, spreadsheet_id, sheet_name):
         for col in numeric_cols:
             df_to_write[col] = df_to_write[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "")
         
-        worksheet.update('F1:X1', [[
-            'MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision'
-        ]])
+        # Mettre à jour les en-têtes (Colonnes F à X)
+        headers_with_gaps = ['MM5','MM10','MM20','MM50','MMdecision','Bande_centrale','Bande_Inferieure','Bande_Supérieure','Boldecision','Ligne MACD','Ligne de signal','Histogramme','MACDdecision','RS','RSI','RSIdecision','%K','%D','Stocdecision']
+        worksheet.update('F1:X1', [headers_with_gaps])
         
         data_list = df_to_write.values.tolist()
         worksheet.update(f'F2:X{len(data_list)+1}', data_list)
